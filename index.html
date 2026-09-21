@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta content="width=device-width,initial-scale=1" name="viewport">
 <title>PvZ Portable — Web</title>
-<script src="https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js"></script>
+<script src="vendor/jszip.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#1a1a2e;color:#eee;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;min-height:100vh}
@@ -13,38 +13,30 @@ body.game-mode{overflow:hidden}
 #canvas-container{display:none;width:100vw;height:100vh;position:fixed;inset:0;justify-content:center;align-items:center;background:#000;overflow:hidden}
 #canvas-container:fullscreen{width:100%;height:100%}
 canvas#canvas{display:block;background:#000;outline:0}
-#save-bar{
-  display:none;position:fixed;bottom:0;left:0;right:0;z-index:9999;
-  background:linear-gradient(to top,rgba(0,0,0,.85) 0%,transparent 100%);
-  padding:10px 16px 12px;gap:10px;flex-direction:row;
-  align-items:center;justify-content:center;flex-wrap:wrap;
-  transition:opacity .3s;opacity:0;pointer-events:none;
+
+#save-toggle{
+  display:none;position:fixed;right:14px;bottom:14px;z-index:9999;
+  padding:6px 12px;border-radius:6px;border:1px solid rgba(255,255,255,.2);
+  background:rgba(20,20,35,.75);color:#ddd;font-size:12px;cursor:pointer;
 }
-#save-bar.visible{opacity:1;pointer-events:all}
-.sv-btn{
-  display:inline-flex;align-items:center;gap:6px;padding:7px 14px;
-  border-radius:8px;border:1.5px solid rgba(255,255,255,.18);
-  background:rgba(30,30,50,.88);color:#f0f0f0;font-size:13px;
-  font-weight:600;cursor:pointer;transition:background .15s,transform .1s;
-  white-space:nowrap;user-select:none;
+#save-toggle:hover{background:rgba(20,20,35,.95)}
+
+#save-panel{
+  display:none;position:fixed;right:14px;bottom:50px;z-index:9999;
+  width:220px;padding:12px;border-radius:8px;border:1px solid rgba(255,255,255,.15);
+  background:rgba(20,20,35,.95);
 }
-.sv-btn:hover{background:rgba(80,120,200,.5);transform:translateY(-1px)}
-.sv-btn:active{transform:translateY(0)}
-.sv-btn.green{border-color:rgba(100,220,130,.5)}
-.sv-btn.green:hover{background:rgba(50,160,80,.5)}
-.sv-btn.red{border-color:rgba(220,80,80,.5)}
-.sv-btn.red:hover{background:rgba(160,50,50,.5)}
-.sv-btn.amber{border-color:rgba(240,180,60,.5)}
-.sv-btn.amber:hover{background:rgba(150,100,30,.5)}
-#save-status{font-size:12px;color:rgba(200,240,200,.85);min-width:160px;text-align:center}
-#save-hover-zone{display:none;position:fixed;bottom:0;left:0;right:0;height:40px;z-index:9998}
-#sv-toast{
-  position:fixed;bottom:72px;left:50%;transform:translateX(-50%);
-  background:rgba(20,20,40,.94);border:1px solid rgba(100,200,255,.3);
-  border-radius:10px;padding:10px 20px;font-size:13px;color:#d0f0ff;
-  z-index:10000;opacity:0;transition:opacity .3s;pointer-events:none;white-space:nowrap;
+#save-panel.open{display:block}
+#save-panel button{
+  display:block;width:100%;margin-bottom:6px;padding:7px 10px;
+  border-radius:5px;border:1px solid rgba(255,255,255,.15);
+  background:rgba(255,255,255,.06);color:#eee;font-size:12px;cursor:pointer;
+  text-align:left;
 }
-#sv-toast.show{opacity:1}
+#save-panel button:last-of-type{margin-bottom:0}
+#save-panel button:hover{background:rgba(255,255,255,.14)}
+#save-panel button#btn-clear{color:#ff9a9a}
+#save-status{margin-top:8px;font-size:11px;color:#9c9cae;line-height:1.4}
 </style>
 </head>
 <body class="upload-mode">
@@ -58,82 +50,97 @@ canvas#canvas{display:block;background:#000;outline:0}
   <canvas id="canvas" width="800" height="600" tabindex="0"></canvas>
 </div>
 
-<div id="save-bar">
-  <button class="sv-btn green" id="btn-export">💾 Export Save</button>
-  <button class="sv-btn amber" id="btn-import">📂 Import Save</button>
-  <button class="sv-btn red"   id="btn-clear" >🗑 Clear Save</button>
-  <span id="save-status">⏳ Loading…</span>
+<button id="save-toggle">Save data</button>
+<div id="save-panel">
+  <button id="btn-export">Export save</button>
+  <button id="btn-import">Import save</button>
+  <button id="btn-clear">Clear save</button>
+  <div id="save-status">loading...</div>
   <input id="import-file-input" type="file" accept=".zip,.dat,.sav,.v4" style="display:none">
 </div>
-<div id="save-hover-zone"></div>
-<div id="sv-toast"></div>
 
 <script>
 "use strict";
 
-// Save files found in WASM binary:
-//   userdata/users.dat  userdata/user%d.dat
-//   userdata/game%d_%d.dat  userdata/game%d_%d.v4
+// The game reads/writes userdata/users.dat, userdata/user<N>.dat and
+// userdata/game<N>_<M>.dat|.v4 relative to its cwd ("/"), so we mount
+// IndexedDB storage at /userdata before starting it.
 var SAVE_MOUNT = "/userdata";
 
 var collectedFiles = new Map();
 var gameStarted = false;
 var canvas = document.getElementById("canvas");
-var saveBar   = document.getElementById("save-bar");
-var hoverZone = document.getElementById("save-hover-zone");
-var statusEl  = document.getElementById("save-status");
+var saveToggle = document.getElementById("save-toggle");
+var savePanel  = document.getElementById("save-panel");
+var statusEl   = document.getElementById("save-status");
 
-function showSaveBar(){ saveBar.classList.add("visible"); }
-function hideSaveBar(){ saveBar.classList.remove("visible"); }
-function setSaveStatus(t){ statusEl.textContent = t; }
-function toast(msg, ms){
-  ms = ms||3000;
-  var el = document.getElementById("sv-toast");
-  el.textContent = msg; el.classList.add("show");
-  clearTimeout(el._t); el._t = setTimeout(function(){ el.classList.remove("show"); }, ms);
-}
-hoverZone.addEventListener("mouseenter", showSaveBar);
-saveBar.addEventListener("mouseenter", showSaveBar);
-saveBar.addEventListener("mouseleave", function(){ setTimeout(hideSaveBar, 800); });
+saveToggle.addEventListener("click", function(){
+  savePanel.classList.toggle("open");
+});
+document.addEventListener("click", function(e){
+  if(!savePanel.classList.contains("open")) return;
+  if(savePanel.contains(e.target) || e.target===saveToggle) return;
+  savePanel.classList.remove("open");
+});
 
-function flushToIDB(cb){
+function setStatus(t){ statusEl.textContent = t; }
+
+// Only one syncfs() at a time is safe. If a save is already in flight
+// when another is requested, remember it and run once the first finishes
+// instead of overlapping the two.
+var syncInFlight = false, syncPending = false;
+function persist(cb){
+  if(syncInFlight){ syncPending = true; return; }
+  syncInFlight = true;
   Module.FS.syncfs(false, function(err){
-    if(err) console.warn("flush error:", err);
-    else setSaveStatus("✅ Saved " + new Date().toLocaleTimeString());
+    syncInFlight = false;
+    if(err){
+      console.warn("save sync failed:", err);
+      setStatus("Save failed to write: " + err);
+    } else {
+      setStatus("Last saved " + new Date().toLocaleTimeString());
+    }
+    if(syncPending){ syncPending = false; persist(); }
     cb && cb(err);
   });
 }
 
-function listAllFiles(root){
-  var files=[];
-  function walk(dir){
-    var entries; try{ entries=Module.FS.readdir(dir); }catch(e){ return; }
-    for(var i=0;i<entries.length;i++){
-      var n=entries[i]; if(n==="."||n==="..") continue;
-      var full=(dir==="/"?"":dir)+"/"+n;
-      var st; try{ st=Module.FS.stat(full); }catch(e){ continue; }
-      if(Module.FS.isDir(st.mode)) walk(full); else files.push(full);
-    }
+function listSaveFiles(){
+  var files = [];
+  var entries;
+  try{ entries = Module.FS.readdir(SAVE_MOUNT); }catch(e){ return files; }
+  for(var i=0;i<entries.length;i++){
+    var name = entries[i];
+    if(name==="."||name==="..") continue;
+    files.push(SAVE_MOUNT + "/" + name);
   }
-  walk(root); return files;
+  return files;
 }
 
 document.getElementById("btn-export").addEventListener("click", async function(){
-  setSaveStatus("⏳ Flushing…");
-  flushToIDB(async function(){
-    var files=listAllFiles(SAVE_MOUNT);
-    if(!files.length){ toast("⚠ No saves yet — play a bit first!"); setSaveStatus("❌ No saves"); return; }
-    var zip=new JSZip();
-    for(var i=0;i<files.length;i++){
-      try{ zip.file(files[i].replace(/^\//,""), Module.FS.readFile(files[i])); }catch(e){}
+  if(typeof JSZip === "undefined"){
+    setStatus("Export is unavailable (vendor/jszip.min.js didn't load).");
+    return;
+  }
+  setStatus("Preparing export...");
+  persist(async function(){
+    var files = listSaveFiles();
+    if(!files.length){
+      setStatus("Nothing to export yet — play a level first.");
+      return;
     }
-    var blob=await zip.generateAsync({type:"blob"});
-    var a=document.createElement("a");
-    a.href=URL.createObjectURL(blob);
-    a.download="pvz-save-"+new Date().toISOString().slice(0,10)+".zip";
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    toast("💾 Exported "+files.length+" file(s)");
-    setSaveStatus("✅ Exported");
+    var zip = new JSZip();
+    for(var i=0;i<files.length;i++){
+      try{ zip.file(files[i].slice(1), Module.FS.readFile(files[i])); }catch(e){}
+    }
+    var blob = await zip.generateAsync({type:"blob"});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "pvz-save-" + new Date().toISOString().slice(0,10) + ".zip";
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus("Exported " + files.length + " file(s).");
   });
 });
 
@@ -142,74 +149,105 @@ document.getElementById("btn-import").addEventListener("click", function(){
 });
 
 document.getElementById("import-file-input").addEventListener("change", async function(){
-  var file=this.files[0]; if(!file) return; this.value="";
-  setSaveStatus("⏳ Importing…");
+  var file = this.files[0];
+  this.value = "";
+  if(!file) return;
+
+  setStatus("Importing...");
   try{
-    var count=0;
-    if(file.name.endsWith(".zip")){
-      var zip=await JSZip.loadAsync(await file.arrayBuffer());
-      var promises=[];
-      zip.forEach(function(relPath,entry){
+    var count = 0;
+    if(file.name.toLowerCase().endsWith(".zip")){
+      if(typeof JSZip === "undefined"){
+        setStatus("Can't read .zip files (vendor/jszip.min.js didn't load). Try a single save file instead.");
+        return;
+      }
+      var zip = await JSZip.loadAsync(await file.arrayBuffer());
+      var writes = [];
+      zip.forEach(function(relPath, entry){
         if(entry.dir) return;
-        promises.push(entry.async("uint8array").then(function(data){
-          var abs=relPath.match(/^(\/)?userdata\//) ? "/"+relPath.replace(/^\//,"") : SAVE_MOUNT+"/"+relPath;
-          abs=abs.replace(/\/+/g,"/");
-          var parts=abs.split("/").filter(Boolean), cur="";
-          for(var j=0;j<parts.length-1;j++){ cur+="/"+parts[j]; try{Module.FS.mkdir(cur);}catch(e){} }
-          Module.FS.writeFile(abs,data); count++;
+        writes.push(entry.async("uint8array").then(function(data){
+          var abs = "/" + relPath.replace(/^\/+/, "");
+          if(!/^\/userdata\//.test(abs)) abs = SAVE_MOUNT + "/" + relPath.replace(/^\/+/, "");
+          var dir = abs.slice(0, abs.lastIndexOf("/"));
+          try{ Module.FS.mkdirTree(dir); }catch(e){}
+          Module.FS.writeFile(abs, data);
+          count++;
         }));
       });
-      await Promise.all(promises);
+      await Promise.all(writes);
     } else {
-      var data=new Uint8Array(await file.arrayBuffer());
-      try{Module.FS.mkdir(SAVE_MOUNT);}catch(e){}
-      Module.FS.writeFile(SAVE_MOUNT+"/"+file.name,data); count=1;
+      var data = new Uint8Array(await file.arrayBuffer());
+      try{ Module.FS.mkdirTree(SAVE_MOUNT); }catch(e){}
+      Module.FS.writeFile(SAVE_MOUNT + "/" + file.name, data);
+      count = 1;
     }
-    flushToIDB(function(err){
-      if(err){ toast("⚠ Imported but couldn't persist"); setSaveStatus("⚠ Partial"); }
-      else { toast("📂 Imported "+count+" file(s)! Refresh to apply."); setSaveStatus("✅ Imported — refresh!"); }
+
+    if(!count){
+      setStatus("That file didn't contain any save data.");
+      return;
+    }
+
+    persist(function(err){
+      if(err){
+        setStatus("Imported, but couldn't write to storage.");
+        return;
+      }
+      setStatus("Imported " + count + " file(s). Reloading...");
+      setTimeout(function(){ location.reload(); }, 900);
     });
-  }catch(e){ toast("❌ "+e.message); setSaveStatus("❌ Import error"); }
+  }catch(e){
+    setStatus("Import failed: " + e.message);
+  }
 });
 
 document.getElementById("btn-clear").addEventListener("click", function(){
-  if(!confirm("Delete all PvZ saves in this browser?\n(Export first to back up.)")) return;
-  var files=listAllFiles(SAVE_MOUNT);
-  for(var i=0;i<files.length;i++){ try{Module.FS.unlink(files[i]);}catch(e){} }
-  flushToIDB(function(){ toast("🗑 Saves cleared."); setSaveStatus("🆕 No saves"); });
+  if(!confirm("Delete all saves stored in this browser? Export a backup first if you want to keep them.")) return;
+  var files = listSaveFiles();
+  for(var i=0;i<files.length;i++){
+    try{ Module.FS.unlink(files[i]); }catch(e){}
+  }
+  persist(function(){ setStatus("Saves cleared."); });
 });
 
-window.addEventListener("beforeunload", function(){ if(gameStarted) flushToIDB(); });
-window.onGameExit = function(){ flushToIDB(); };
-setInterval(function(){ if(gameStarted) flushToIDB(); }, 30000);
+document.addEventListener("visibilitychange", function(){
+  if(document.hidden && gameStarted) persist();
+});
+window.addEventListener("beforeunload", function(){
+  if(gameStarted) persist();
+});
+setInterval(function(){ if(gameStarted) persist(); }, 20000);
 
-// ── The critical piece: mount IDBFS and populate BEFORE the game reads saves ──
-// onRuntimeInitialized fires after WASM is ready but before callMain.
-// We do the mount + IDB→FS sync here, then resolve the promise to unblock startGame.
-var _resolveModuleReady;
-var moduleReadyPromise = new Promise(function(res){ _resolveModuleReady = res; });
+// onRuntimeInitialized fires once the wasm is ready but before callMain.
+// We mount IndexedDB storage and pull any existing saves in here, then
+// resolve this promise so startGame() knows it's safe to launch.
+var resolveModuleReady;
+var moduleReadyPromise = new Promise(function(res){ resolveModuleReady = res; });
 
 var Module = {
   canvas: canvas,
   noInitialRun: true,
   onRuntimeInitialized: function(){
-    // Mount /userdata as IDBFS
-    try{ Module.FS.mkdir(SAVE_MOUNT); }catch(e){}
     try{
-      Module.FS.mount(Module.FS.filesystems.IDBFS, {autoPersist: true}, SAVE_MOUNT);
+      Module.FS.mkdir(SAVE_MOUNT);
+      Module.FS.mount(Module.FS.filesystems.IDBFS, {}, SAVE_MOUNT);
     }catch(e){
-      console.error("IDBFS mount failed:", e);
-      _resolveModuleReady(); return;
+      console.error("could not mount save storage:", e);
+      setStatus("Save storage unavailable in this browser.");
+      resolveModuleReady();
+      return;
     }
-    // Populate FS from IndexedDB, THEN unblock callMain
-    setSaveStatus("⏳ Loading saves…");
+    setStatus("Loading saves...");
     Module.FS.syncfs(true, function(err){
-      if(err){ console.warn("IDB populate error:", err); setSaveStatus("⚠ Save load error"); }
-      else { setSaveStatus("✅ Saves loaded"); }
-      _resolveModuleReady();
+      if(err){
+        console.warn("could not load existing saves:", err);
+        setStatus("Couldn't load existing saves.");
+      } else {
+        setStatus("Saves loaded.");
+      }
+      resolveModuleReady();
     });
   },
-  onAbort: function(e){ console.error("WASM aborted:", e); },
+  onAbort: function(e){ console.error("wasm aborted:", e); },
   print:    console.log,
   printErr: console.warn
 };
@@ -235,10 +273,10 @@ async function startGame(){
   document.getElementById("upload-screen").style.display="none";
   document.getElementById("canvas-container").style.display="flex";
 
-  // Wait for WASM init + IDBFS mount + IDB→FS populate (all done in onRuntimeInitialized)
+  // Wait for the save mount to be ready before writing game assets, so
+  // nothing races with the IndexedDB populate.
   await moduleReadyPromise;
 
-  // Write game asset files
   for(var [path,file] of collectedFiles.entries()){
     var data=new Uint8Array(await file.arrayBuffer());
     var parts=path.split("/"), dir="/";
@@ -249,14 +287,9 @@ async function startGame(){
     Module.FS.writeFile("/"+path, data);
   }
 
-  // Launch game — /userdata is already populated from IDB
   Module.callMain([]);
   gameStarted=true;
-
-  saveBar.style.display="flex";
-  hoverZone.style.display="block";
-  showSaveBar();
-  setTimeout(hideSaveBar, 4500);
+  saveToggle.style.display="block";
 }
 
 autoLoadResources();
