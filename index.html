@@ -62,6 +62,15 @@ canvas#canvas{display:block;background:#000;outline:0}
 <script>
 "use strict";
 
+// The compiled game calls emscripten_set_window_title() at startup,
+// which overwrites document.title with its own baked-in name. Pin the
+// title so that can't override what's in the <title> tag above.
+Object.defineProperty(document, "title", {
+  configurable: true,
+  get: function(){ return "Plants vs. Zombies"; },
+  set: function(){ /* ignore — the game tries to rename the tab itself */ }
+});
+
 // The game writes its saves under /saves/userdata/ (users.dat,
 // user<N>.dat, game<N>_<M>.dat|.v4) — not /userdata like the file names
 // suggest. /saves/cache32 also lives next to it, but that's just a
