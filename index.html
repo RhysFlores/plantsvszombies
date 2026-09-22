@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta content="width=device-width,initial-scale=1" name="viewport">
-<title>PvZ Portable — Web</title>
+<title>Plants vs. Zombies</title>
 <script src="vendor/jszip.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -62,10 +62,11 @@ canvas#canvas{display:block;background:#000;outline:0}
 <script>
 "use strict";
 
-// The game reads/writes userdata/users.dat, userdata/user<N>.dat and
-// userdata/game<N>_<M>.dat|.v4 relative to its cwd ("/"), so we mount
-// IndexedDB storage at /userdata before starting it.
-var SAVE_MOUNT = "/userdata";
+// The game writes its saves under /saves/userdata/ (users.dat,
+// user<N>.dat, game<N>_<M>.dat|.v4) — not /userdata like the file names
+// suggest. /saves/cache32 also lives next to it, but that's just a
+// rebuildable shader/particle cache, not save data, so we leave it alone.
+var SAVE_MOUNT = "/saves/userdata";
 
 var collectedFiles = new Map();
 var gameStarted = false;
@@ -166,8 +167,14 @@ document.getElementById("import-file-input").addEventListener("change", async fu
       zip.forEach(function(relPath, entry){
         if(entry.dir) return;
         writes.push(entry.async("uint8array").then(function(data){
-          var abs = "/" + relPath.replace(/^\/+/, "");
-          if(!/^\/userdata\//.test(abs)) abs = SAVE_MOUNT + "/" + relPath.replace(/^\/+/, "");
+          var clean = relPath.replace(/^\/+/, "");
+          // Accept a zip exported by this same build (paths already
+          // rooted at SAVE_MOUNT) as well as one from before the mount
+          // path was fixed (paths rooted at the old, wrong /userdata).
+          var abs;
+          if(clean.indexOf("saves/userdata/") === 0) abs = "/" + clean;
+          else if(clean.indexOf("userdata/") === 0) abs = SAVE_MOUNT + "/" + clean.slice("userdata/".length);
+          else abs = SAVE_MOUNT + "/" + clean;
           var dir = abs.slice(0, abs.lastIndexOf("/"));
           try{ Module.FS.mkdirTree(dir); }catch(e){}
           Module.FS.writeFile(abs, data);
@@ -228,7 +235,7 @@ var Module = {
   noInitialRun: true,
   onRuntimeInitialized: function(){
     try{
-      Module.FS.mkdir(SAVE_MOUNT);
+      Module.FS.mkdirTree(SAVE_MOUNT);
       Module.FS.mount(Module.FS.filesystems.IDBFS, {}, SAVE_MOUNT);
     }catch(e){
       console.error("could not mount save storage:", e);
